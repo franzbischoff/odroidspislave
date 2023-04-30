@@ -1,0 +1,12 @@
+{
+  "files.associations": {
+    ".clang-tidy": "yaml",
+    "*.defaults": "properties",
+    "*.log-viewer": "log",
+    "doxyfile": "properties",
+    "*.jinja": "jinja",
+    "*.log.*": "log",
+    "*.log": "log",
+    "wiring_private.h": "c"
+  }
+}

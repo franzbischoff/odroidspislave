@@ -26,6 +26,8 @@
 
 typedef void (*voidFuncPtr)(void);
 static volatile voidFuncPtr intSPIFunc;
+volatile uint8_t spiRdy;
+volatile uint8_t spiData;
 
 void attachSPIInterrupt(void (*userFunc)(void))
 {
@@ -46,6 +48,8 @@ ISR(SPI_STC_vect)
 
 void spi_slave_begin()
 {
+  spiRdy = 0;
+  spiData = 0;
   pinMode(MOSI, INPUT);
   pinMode(SCK, INPUT);
   pinMode(MISO, OUTPUT);
@@ -57,6 +61,18 @@ void spi_slave_begin()
 void spi_slave_end()
 {
   SPCR &= ~_BV(SPE);
+}
+
+uint8_t spi_slave_receive()
+{
+  uint8_t receive;
+
+  asm volatile("nop");
+  while (!(SPSR & _BV(SPIF)))
+    ;
+  receive = SPDR;
+
+  return receive;
 }
 
 uint8_t spi_slave_transfer(uint8_t data)
@@ -80,26 +96,44 @@ uint8_t spi_slave_transfer(uint8_t data)
 OneWire oneWire(ONE_WIRE_BUS);
 
 // Pass our oneWire reference to Dallas Temperature sensor
-DallasTemperature sensors(&oneWire);
+DallasTemperature tempSensor(&oneWire);
 
 // Create a new FanController instance.
-// FanController fan(FAN_TACH_PIN, SENSOR_THRESHOLD, FAN_PWM_PIN);
+FanController fan(FAN_TACH_PIN, SENSOR_THRESHOLD, FAN_PWM_PIN);
 
 void get_instructions()
 {
-  uint8_t tempData = spi_slave_transfer(0x00);
-  // SPI.endTransaction();
-  Serial.print("Temp[C]=");
-  Serial.println(tempData, DEC);
+  spiData = spi_slave_receive();
+  spiRdy = 1;
 }
 
 uint8_t system_online = 0;
 uint8_t psu_is_on = 0;
 uint8_t builtin_temp_check = 0;
+uint8_t remote_temp_check = 0;
+uint8_t use_builtin_temp = 0;
+uint8_t remote_temp = 0;
+unsigned long atimer = 0;
+unsigned long spiTimer = 0;
+
+void checkRemoteTemperature()
+{
+  Serial.println("DEBUG: Checking remote temperature");
+  if (spiRdy == 1)
+  {
+    remote_temp = spiData;
+    spiRdy = 0;
+    Serial.print("Temp[C]=");
+    Serial.println(remote_temp, DEC);
+    remote_temp_check = 1;
+    use_builtin_temp = 0;
+    spiTimer = millis();
+  }
+}
 
 void checkSystemOnline()
 {
-  if (digitalRead(ONLINE_PIN) > 0)
+  if (digitalRead(ONLINE_PIN) == HIGH)
   {
     Serial.println("DEBUG: System is online");
     system_online = 1;
@@ -200,7 +234,7 @@ void checkBuiltinTemp()
     Serial.println("DEBUG: Checking builtin temp");
 
     // Grab a count of devices on the wire
-    uint8_t numberOfDevices = sensors.getDeviceCount();
+    uint8_t numberOfDevices = tempSensor.getDeviceCount();
 
     /*
      * Constructs DallasTemperature with strong pull-up turned on. Strong pull-up is mandated in DS18B20 datasheet for parasitic
@@ -220,34 +254,25 @@ void checkBuiltinTemp()
 
       // // report parasite power requirements
       // Serial.print("DEBUG: Parasite power is: ");
-      // if (sensors.isParasitePowerMode())
+      // if (tempSensor.isParasitePowerMode())
       //   Serial.println("ON");
       // else
       //   Serial.println("OFF");
     }
 
-    sensors.requestTemperatures(); // Send the command to get temperatures
-    float tempC = sensors.getTempCByIndex(0);
+    tempSensor.requestTemperatures(); // Send the command to get temperatures
+    float tempC = tempSensor.getTempCByIndex(0);
 
-    if(tempC < 0) {
+    if (tempC < 0)
+    {
       Serial.println("DEBUG: reading error, check wiring");
       return;
     }
 
-    Serial.print("Temp[C]=");
+    Serial.print("InTemp[C]=");
     Serial.println(tempC);
 
-    if (tempC > 50)
-    {
-      Serial.println("DEBUG: Temp is too high, let's turn on the fan");
-      // fan.setDutyCycle(100); // Set fan duty cycle to 100%
-    }
-    else
-    {
-      Serial.println("DEBUG: Temp is ok, let's turn off the fan");
-      // fan.setDutyCycle(0); // Set fan duty cycle to 0%
-    }
-
+    use_builtin_temp = 1;
     builtin_temp_check = 1;
   }
   else
@@ -256,19 +281,96 @@ void checkBuiltinTemp()
   }
 }
 
+float getBuiltinTemp()
+{
+  if (builtin_temp_check == 1)
+  {
+    tempSensor.requestTemperatures(); // Send the command to get temperatures
+    float tempC = tempSensor.getTempCByIndex(0);
+
+    if (tempC < 0)
+    {
+      Serial.println("DEBUG: reading error, check wiring");
+      builtin_temp_check = 0;
+      return -1.0f;
+    }
+
+    return tempC;
+  } else {
+    return -1.0f;
+  }
+}
+
+float getRemoteTemp()
+{
+  float temp = -1.0f;
+
+  if (remote_temp_check == 1)
+  {
+    temp = (float)remote_temp;
+    temp /= 10.0f;
+  }
+
+  return temp;
+}
+
+void adjustFanSpeed()
+{
+  float temp = 0.0f;
+
+  if (use_builtin_temp == 1)
+  {
+    Serial.println("DEBUG: Using builtin temp");
+    temp = getBuiltinTemp();
+  }
+  else
+  {
+    Serial.println("DEBUG: Using remote temp");
+    temp = getRemoteTemp();
+  }
+
+  if (temp < 0.0f)
+  {
+    Serial.println("DEBUG: Temp reading error, check wiring");
+    return;
+  }
+
+  if (temp < 30.0f)
+  {
+    Serial.println("DEBUG: Temp is low, let's turn off the fan");
+    fan.setDutyCycle(0); // Set fan duty cycle to 0%
+  }
+  else if (temp > 40.0f)
+  {
+    Serial.println("DEBUG: Temp is getting high, let's turn on the fan");
+    fan.setDutyCycle(10); // Set fan duty cycle to 10%
+  }
+  else if (temp > 50.0f)
+  {
+    Serial.println("DEBUG: Temp is hot, let's increase the fan speed");
+    fan.setDutyCycle(30); // Set fan duty cycle to 30%
+  }
+  else if (temp > 60.0f)
+  {
+    Serial.println("DEBUG: Temp is getting crazy, let's pump it up");
+    fan.setDutyCycle(60); // Set fan duty cycle to 60%
+  }
+}
+
 void setup()
 {
   Serial.begin(9600);
   // FAN
-  // fan.begin();
-  // fan.setDutyCycle(10); // Set fan duty cycle to 10%
+  fan.begin();
+  fan.setDutyCycle(15); // Set fan duty cycle to 10%
 
   // Start up Dallas OneWire
-  sensors.begin();
+  tempSensor.begin();
 
   // SPI
-  // spi_slave_begin();
-  // attachSPIInterrupt(get_instructions);
+  spi_slave_begin();
+  attachSPIInterrupt(get_instructions);
+  // call the toggle_led function every 1000 millis (1 second)
 
   // Online Check
   pinMode(ONLINE_PIN, INPUT);
@@ -281,10 +383,19 @@ void setup()
   wdt_enable(WDTO_2S); /* Enable the watchdog with a timeout of 2 seconds */
   // give some time to settle things
   delay(100);
+  atimer = millis(); // starting timer
+  spiTimer = millis();
 }
 
 void loop()
 {
+  unsigned long currentMillis = millis();
+  if (atimer > currentMillis)
+  {
+    // millis() overflow
+    atimer = currentMillis;
+    spiTimer = currentMillis;
+  }
   // Task 1: Check if system is online
   checkSystemOnline();
 
@@ -301,60 +412,29 @@ void loop()
   // Task 3: Check Built-in temperature sensor
   checkBuiltinTemp();
 
-  // Task 4: Wait for SPI temperatures and adjust fan speed
+  // Task 4: Wait for SPI temperatures
+  checkRemoteTemperature();
 
   // Task 5: If SPI is silent for more than 20 seconds, use built-in temperature sensor to adjust fan speed
-
-  // Task 6: If SPI is silent for more than 1 minute, increase fan speed to a noisy level
-
-  sensors.requestTemperatures();
-
-  // Grab a count of devices on the wire
-  int numberOfDevices = sensors.getDeviceCount();
-
-  // locate devices on the bus
-  Serial.print("Locating devices...");
-  Serial.print("Found ");
-  Serial.print(numberOfDevices, DEC);
-  Serial.println(" devices.");
-
-  Serial.print("Celsius temperature: ");
-  // Why "byIndex"? You can have more than one IC on the same bus. 0 refers to the first IC on the wire
-  Serial.print(sensors.getTempCByIndex(0));
-  Serial.print(" - Fahrenheit temperature: ");
-  Serial.println(sensors.getTempFByIndex(0));
-
-  // Call fan.getSpeed() to get fan RPM.
-  // Serial.print("Current speed: ");
-  // uint16_t rpms = fan.getSpeed();
-  // Serial.print(rpms);
-  // Serial.println(" RPM");
-
-  // Get new speed from Serial (0-100%)
-  if (Serial.available() > 0)
+  if ((currentMillis - spiTimer) > 20000)
   {
-    // Parse speed
-    uint16_t input = (uint16_t)Serial.parseInt();
-
-    // Constrain a 0-100 range
-    uint8_t target = max(min(input, 50), 0);
-
-    if (target > 0)
-    {
-
-      // Print obtained value
-      Serial.print("Setting duty cycle: ");
-      Serial.println(target, DEC);
-
-      // Set fan duty cycle
-      // fan.setDutyCycle(target);
-    }
+    Serial.println("DEBUG: No remote temp for 20 sec");
+    use_builtin_temp = 1;
+    remote_temp_check = 0;
   }
 
-  // Get duty cycle
-  // uint8_t dutyCycle = fan.getDutyCycle();
-  // Serial.print("Duty cycle: ");
-  // Serial.println(dutyCycle, DEC);
+  // Task 6: If SPI is silent for more than 1 minute, increase fan speed to a noisy level
+  if ((currentMillis - spiTimer) > 60000)
+  {
+    Serial.println("DEBUG: No remote temp for 60 sec");
+    fan.setDutyCycle(60); // Set fan duty cycle to 60%
+  }
+  else
+  {
+    adjustFanSpeed();
+  }
+
   delay(1000);
   wdt_reset(); /* Reset the watchdog */
+  atimer = currentMillis;
 }

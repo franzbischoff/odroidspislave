@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "author": "Francisco Bischoff (Franz)",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-arduino-nano", "id": "nano", "top": 0, "left": 0, "attrs": {} },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": -110.27,
+      "left": 35,
+      "attrs": { "color": "red", "flip": "1" }
+    },
+    {
+      "type": "board-ds18b20",
+      "id": "temp1",
+      "top": -195.93,
+      "left": 116.34,
+      "attrs": { "value": "30" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": -115.11,
+      "left": 157.87,
+      "attrs": { "value": "4700" }
+    },
+    { "type": "wokwi-vcc", "id": "vcc1", "top": -233.61, "left": 277.33, "attrs": {} },
+    { "type": "wokwi-gnd", "id": "gnd1", "top": 201.87, "left": 123.54, "attrs": {} },
+    { "type": "wokwi-vcc", "id": "vcc2", "top": 208.37, "left": -17.87, "attrs": {} },
+    {
+      "type": "wokwi-resistor",
+      "id": "r2",
+      "top": 146.21,
+      "left": 48.14,
+      "rotate": 90,
+      "attrs": { "value": "10000" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r3",
+      "top": 150.22,
+      "left": 74.13,
+      "rotate": 90,
+      "attrs": { "value": "10000" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r4",
+      "top": 91.15,
+      "left": 107.07,
+      "rotate": 180,
+      "attrs": { "value": "10000" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r5",
+      "top": 108.08,
+      "left": 108.67,
+      "rotate": 180,
+      "attrs": { "value": "10000" }
+    },
+    {
+      "type": "wokwi-vcc",
+      "id": "vcc3",
+      "top": 219.3,
+      "left": 252.39,
+      "rotate": 180,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led2",
+      "top": 107.99,
+      "left": 10.6,
+      "rotate": 180,
+      "attrs": { "color": "red", "flip": "1" }
+    },
+    {
+      "type": "wokwi-slide-switch",
+      "id": "sw1",
+      "top": 116.54,
+      "left": 263.91,
+      "rotate": 90,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-slide-switch",
+      "id": "sw2",
+      "top": 232.8,
+      "left": 72.84,
+      "rotate": 90,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    [ "nano:7", "led1:A", "green", [ "v-21.68", "h-25.26", "v-51.39" ] ],
+    [ "nano:GND.2", "led1:C", "black", [ "v-60.34", "h-29.3" ] ],
+    [ "temp1:DQ", "nano:4", "green", [ "v35.26", "h-35.02", "v116.34" ] ],
+    [ "r1:1", "temp1:DQ", "green", [ "v3.91", "h-26.4" ] ],
+    [ "vcc1:VCC", "r1:2", "red", [ "v0" ] ],
+    [ "vcc1:VCC", "nano:VIN", "red", [ "v275.37", "h-136.17" ] ],
+    [ "gnd1:GND", "nano:GND.1", "black", [ "h53.37", "v-121.41", "h-42.61" ] ],
+    [ "r2:1", "nano:A3", "green", [ "h0" ] ],
+    [ "r3:1", "r2:1", "green", [ "h0" ] ],
+    [ "gnd1:GND", "r3:2", "black", [ "v0" ] ],
+    [ "r5:2", "r4:2", "green", [ "v0" ] ],
+    [ "nano:A5", "r4:2", "green", [ "v0" ] ],
+    [ "temp1:GND", "nano:GND.2", "black", [ "h3.91", "v151.6" ] ],
+    [ "temp1:VCC", "vcc1:VCC", "red", [ "v9.92", "h146.53" ] ],
+    [ "nano:A2", "led2:A", "green", [ "v0" ] ],
+    [ "nano:GND.1", "led2:C", "black", [ "v12.79", "h-118.9" ] ],
+    [ "vcc3:VCC", "sw1:2", "red", [ "v0" ] ],
+    [ "sw1:1", "r4:1", "red", [ "v-28.69", "h-77" ] ],
+    [ "sw2:1", "r2:2", "red", [ "h-6.17", "v-56.96" ] ],
+    [ "sw2:2", "vcc2:VCC", "red", [ "h0" ] ],
+    [ "r5:1", "gnd1:GND", "black", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}

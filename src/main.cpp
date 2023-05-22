@@ -252,6 +252,10 @@ void dealWithPSU()
           digitalWrite(PSU_START_PIN, LOW);
         }
       }
+      else
+      {
+        Serial.println("DEBUG: Waiting 10s before turning off the PSU");
+      }
     }
     else
     {
@@ -313,7 +317,7 @@ void checkBuiltinTemp()
 
 float getBuiltinTemp()
 {
-  if (builtin_temp_check == 1)
+  if (builtin_temp_check == 1) // && use_builtin_temp == 1)
   {
     tempSensor.requestTemperatures(); // Send the command to get temperatures
     float tempC = tempSensor.getTempCByIndex(0);
@@ -323,6 +327,11 @@ float getBuiltinTemp()
       Serial.println("DEBUG: reading error, check wiring");
       builtin_temp_check = 0;
       return -1.0f;
+    }
+    else
+    {
+      Serial.print("InTemp[C]=");
+      Serial.println(tempC);
     }
 
     return tempC;
@@ -340,7 +349,6 @@ float getRemoteTemp()
   if (remote_temp_check == 1)
   {
     temp = (float)remote_temp;
-    temp /= 10.0f;
   }
 
   return temp;
@@ -475,26 +483,27 @@ void loop()
     // Task 4: Wait for SPI temperatures
     checkRemoteTemperature();
 
-    // Task 5: If SPI is silent for more than 20 seconds, use built-in temperature sensor to adjust fan speed
+    // Task 5: If SPI is silent for more than 30 seconds, use built-in temperature sensor to adjust fan speed
     if (spiTimer < loopTimer)
     {
-      if ((loopTimer - spiTimer) > 20000)
+      if ((loopTimer - spiTimer) > 30000)
       {
         status_code = 4;
-        Serial.println("DEBUG: No remote temp for 20 sec");
+        Serial.println("DEBUG: No remote temp for 30 sec");
         use_builtin_temp = 1;
         remote_temp_check = 0;
       }
 
-      // Task 6: If SPI is silent for more than 1 minute, increase fan speed to a noisy level
-      if ((loopTimer - spiTimer) > 60000)
+      // Task 6: If SPI is silent for more than 3 minute, increase fan speed to a noisy level
+      if ((loopTimer - spiTimer) > 180000)
       {
-        status_code = 4;
-        Serial.println("DEBUG: No remote temp for 60 sec");
+        status_code = 6;
+        Serial.println("DEBUG: No remote temp for 180 sec");
         fan.setDutyCycle(60); // Set fan duty cycle to 60%
       }
     }
-    else
+
+    if (status_code < 6)
     {
       adjustFanSpeed();
     }

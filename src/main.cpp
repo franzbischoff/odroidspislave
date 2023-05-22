@@ -8,12 +8,14 @@
 // DS18B20 Temperature Sensor
 #define ONE_WIRE_BUS 4 // Digital pin 4
 // PSU Control
-#define ONLINE_PIN 5     // Digital pin 5
 #define PSU_START_PIN 16 // Digital pin 16 / A2
 #define PSU_OK_PIN 17    // Digital pin 17 / A3
+#define ONLINE_PIN 19    // Digital pin 19 / A5
 // Sensor wire is plugged into port 2 on the Arduino.
 #define FAN_TACH_PIN 2 // Digital pin 2, INT0, yellow wire on FAN
 #define FAN_PWM_PIN 9  // Digital pin 9, PWM, Blue wire on FAN
+
+#define STATUS_LED 7 // Digital pin 7
 
 // Pins 10, 11, 12 and 13 are reserved for SPI.
 
@@ -113,8 +115,11 @@ uint8_t builtin_temp_check = 0;
 uint8_t remote_temp_check = 0;
 uint8_t use_builtin_temp = 0;
 uint8_t remote_temp = 0;
+uint8_t status_code = 1;
 unsigned long atimer = 0;
 unsigned long spiTimer = 0;
+unsigned long sysTimer = 0;
+unsigned long loopTimer = 0;
 
 void checkRemoteTemperature()
 {
@@ -135,13 +140,31 @@ void checkSystemOnline()
 {
   if (digitalRead(ONLINE_PIN) == HIGH)
   {
-    Serial.println("DEBUG: System is online");
-    system_online = 1;
+    if (system_online == 0)
+    {
+      Serial.println("DEBUG: System became online");
+      sysTimer = millis();
+      system_online = 1;
+    }
+    else
+    {
+      Serial.println("DEBUG: System is online");
+    }
+    status_code = 2;
   }
   else
   {
-    Serial.println("DEBUG: System is offline");
-    system_online = 0;
+    if (system_online == 1)
+    {
+      Serial.println("DEBUG: System became offline");
+      sysTimer = millis();
+      system_online = 0;
+    }
+    else
+    {
+      Serial.println("DEBUG: System is offline");
+    }
+    status_code = 1;
   }
 }
 
@@ -152,6 +175,7 @@ void dealWithPSU()
   {
     if (psu_is_on == 0)
     {
+      status_code = 3;
       Serial.println("DEBUG: System needs the PSU on");
 
       if (digitalRead(PSU_START_PIN) > 0)
@@ -165,6 +189,7 @@ void dealWithPSU()
         }
         else
         {
+          status_code = 5;
           Serial.println("DEBUG: But PSU is not on, let's wait a bit more");
           // panic?
         }
@@ -173,6 +198,7 @@ void dealWithPSU()
       {
         if (digitalRead(PSU_OK_PIN) > 0)
         {
+          status_code = 5;
           Serial.println("DEBUG: PSU is already on, but the switch is off?");
           // panic?
         }
@@ -190,33 +216,41 @@ void dealWithPSU()
   {
     if (psu_is_on == 1)
     {
-      Serial.println("DEBUG: System needs the PSU off");
-
-      if (digitalRead(PSU_START_PIN) == 0)
+      status_code = 3;
+      // Wait 10 seconds before turning off the PSU. The system may be just rebooting
+      if ((sysTimer < loopTimer) && ((loopTimer - sysTimer) > 10000))
       {
-        Serial.println("DEBUG: But seems we already tried to stop");
 
-        if (digitalRead(PSU_OK_PIN) == 0)
+        Serial.println("DEBUG: System needs the PSU off");
+
+        if (digitalRead(PSU_START_PIN) == 0)
         {
-          Serial.println("DEBUG: Indeed PSU is silent");
-          psu_is_on = 0;
+          Serial.println("DEBUG: But seems we already tried to stop");
+
+          if (digitalRead(PSU_OK_PIN) == 0)
+          {
+            Serial.println("DEBUG: Indeed PSU is silent");
+            psu_is_on = 0;
+          }
+          else
+          {
+            status_code = 5;
+            Serial.println("DEBUG: But PSU still on, let's wait a bit more");
+            // panic?
+          }
         }
         else
         {
-          Serial.println("DEBUG: But PSU still on, let's wait a bit more");
-          // panic?
-        }
-      }
-      else
-      {
-        if (digitalRead(PSU_OK_PIN) == 0)
-        {
-          Serial.println("DEBUG: PSU is already off, but the switch is on?");
-          // panic?
-        }
+          if (digitalRead(PSU_OK_PIN) == 0)
+          {
+            status_code = 5;
+            Serial.println("DEBUG: PSU is already off, but the switch is on?");
+            // panic?
+          }
 
-        Serial.println("DEBUG: Turning off the Switch");
-        digitalWrite(PSU_START_PIN, LOW);
+          Serial.println("DEBUG: Turning off the Switch");
+          digitalWrite(PSU_START_PIN, LOW);
+        }
       }
     }
     else
@@ -275,10 +309,6 @@ void checkBuiltinTemp()
     use_builtin_temp = 1;
     builtin_temp_check = 1;
   }
-  else
-  {
-    Serial.println("DEBUG: Builtin temp already checked");
-  }
 }
 
 float getBuiltinTemp()
@@ -296,7 +326,9 @@ float getBuiltinTemp()
     }
 
     return tempC;
-  } else {
+  }
+  else
+  {
     return -1.0f;
   }
 }
@@ -357,6 +389,34 @@ void adjustFanSpeed()
   }
 }
 
+void statusCode(uint8_t code)
+{
+
+  // total time must not exceed 2 second
+  int16_t time_left = 1650;
+
+  uint16_t on_time = (time_left / code) - 150;
+
+  for (uint8_t i = 0; i < code; i++)
+  {
+    digitalWrite(STATUS_LED, HIGH);
+    delay(on_time);
+    digitalWrite(STATUS_LED, LOW);
+    delay(150);
+
+    time_left -= (on_time + 150);
+  }
+
+  if (time_left < 0 || time_left > 2000)
+  {
+    delay(0);
+  }
+  else
+  {
+    delay(350);
+  }
+}
+
 void setup()
 {
   Serial.begin(9600);
@@ -378,9 +438,12 @@ void setup()
   pinMode(PSU_START_PIN, OUTPUT);
   digitalWrite(PSU_START_PIN, LOW); // don't start PSU yet
 
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, LOW);
+
   wdt_disable();       /* Disable the watchdog and wait for more than 2 seconds */
   delay(3000);         /* Done so that the Arduino doesn't keep resetting infinitely in case of wrong configuration */
-  wdt_enable(WDTO_2S); /* Enable the watchdog with a timeout of 2 seconds */
+  wdt_enable(WDTO_4S); /* Enable the watchdog with a timeout of 4 seconds */
   // give some time to settle things
   delay(100);
   atimer = millis(); // starting timer
@@ -389,12 +452,12 @@ void setup()
 
 void loop()
 {
-  unsigned long currentMillis = millis();
-  if (atimer > currentMillis)
+  loopTimer = millis();
+  if (atimer > loopTimer)
   {
     // millis() overflow
-    atimer = currentMillis;
-    spiTimer = currentMillis;
+    atimer = loopTimer;
+    spiTimer = loopTimer;
   }
   // Task 1: Check if system is online
   checkSystemOnline();
@@ -404,37 +467,41 @@ void loop()
 
   // If the system is not running, don't need to do anything else
   // Wait a bit, because the CPU may be halted and PSU is refusing to stop
-  // if(system_online == 0 || psu_is_on == 0) {
-  //   delay(1000);
-  //   return;
-  // }
-
-  // Task 3: Check Built-in temperature sensor
-  checkBuiltinTemp();
-
-  // Task 4: Wait for SPI temperatures
-  checkRemoteTemperature();
-
-  // Task 5: If SPI is silent for more than 20 seconds, use built-in temperature sensor to adjust fan speed
-  if ((currentMillis - spiTimer) > 20000)
+  if (system_online == 1 && psu_is_on == 1)
   {
-    Serial.println("DEBUG: No remote temp for 20 sec");
-    use_builtin_temp = 1;
-    remote_temp_check = 0;
+    // Task 3: Check Built-in temperature sensor
+    checkBuiltinTemp();
+
+    // Task 4: Wait for SPI temperatures
+    checkRemoteTemperature();
+
+    // Task 5: If SPI is silent for more than 20 seconds, use built-in temperature sensor to adjust fan speed
+    if (spiTimer < loopTimer)
+    {
+      if ((loopTimer - spiTimer) > 20000)
+      {
+        status_code = 4;
+        Serial.println("DEBUG: No remote temp for 20 sec");
+        use_builtin_temp = 1;
+        remote_temp_check = 0;
+      }
+
+      // Task 6: If SPI is silent for more than 1 minute, increase fan speed to a noisy level
+      if ((loopTimer - spiTimer) > 60000)
+      {
+        status_code = 4;
+        Serial.println("DEBUG: No remote temp for 60 sec");
+        fan.setDutyCycle(60); // Set fan duty cycle to 60%
+      }
+    }
+    else
+    {
+      adjustFanSpeed();
+    }
   }
 
-  // Task 6: If SPI is silent for more than 1 minute, increase fan speed to a noisy level
-  if ((currentMillis - spiTimer) > 60000)
-  {
-    Serial.println("DEBUG: No remote temp for 60 sec");
-    fan.setDutyCycle(60); // Set fan duty cycle to 60%
-  }
-  else
-  {
-    adjustFanSpeed();
-  }
-
-  delay(1000);
+  statusCode(status_code);
   wdt_reset(); /* Reset the watchdog */
-  atimer = currentMillis;
+  atimer = loopTimer;
+  Serial.println("DEBUG: End of cicle");
 }

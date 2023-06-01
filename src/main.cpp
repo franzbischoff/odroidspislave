@@ -16,6 +16,7 @@
 #define FAN_PWM_PIN 9  // Digital pin 9, PWM, Blue wire on FAN
 
 #define STATUS_LED 7 // Digital pin 7
+#define BUZZER 3     // Digital pin 3 (PWM at 490hz)
 
 // Pins 10, 11, 12 and 13 are reserved for SPI.
 
@@ -28,8 +29,8 @@
 
 typedef void (*voidFuncPtr)(void);
 static volatile voidFuncPtr intSPIFunc;
-volatile uint8_t spiRdy;
-volatile uint8_t spiData;
+volatile uint8_t spi_rdy;
+volatile uint8_t spi_data;
 
 void attachSPIInterrupt(void (*userFunc)(void))
 {
@@ -50,8 +51,8 @@ ISR(SPI_STC_vect)
 
 void spi_slave_begin()
 {
-  spiRdy = 0;
-  spiData = 0;
+  spi_rdy = 0;
+  spi_data = 0;
   pinMode(MOSI, INPUT);
   pinMode(SCK, INPUT);
   pinMode(MISO, OUTPUT);
@@ -95,18 +96,18 @@ uint8_t spi_slave_transfer(uint8_t data)
 // Arduino regular code
 
 // Setup a oneWire instance to communicate with any OneWire devices
-OneWire oneWire(ONE_WIRE_BUS);
+OneWire one_wire(ONE_WIRE_BUS);
 
-// Pass our oneWire reference to Dallas Temperature sensor
-DallasTemperature tempSensor(&oneWire);
+// Pass our one_wire reference to Dallas Temperature sensor
+DallasTemperature temp_sensor(&one_wire);
 
 // Create a new FanController instance.
 FanController fan(FAN_TACH_PIN, SENSOR_THRESHOLD, FAN_PWM_PIN);
 
 void get_instructions()
 {
-  spiData = spi_slave_receive();
-  spiRdy = 1;
+  spi_data = spi_slave_receive();
+  spi_rdy = 1;
 }
 
 uint8_t system_online = 0;
@@ -115,91 +116,97 @@ uint8_t builtin_temp_check = 0;
 uint8_t remote_temp_check = 0;
 uint8_t use_builtin_temp = 0;
 uint8_t remote_temp = 0;
-uint8_t status_code = 1;
+uint8_t curr_status = 1;
 unsigned long atimer = 0;
-unsigned long spiTimer = 0;
-unsigned long sysTimer = 0;
-unsigned long loopTimer = 0;
+unsigned long spi_timer = 0;
+unsigned long sys_timer = 0;
+unsigned long loop_timer = 0;
 
-void checkRemoteTemperature()
+void check_remote_temperature()
 {
   Serial.println("DEBUG: Checking remote temperature");
-  if (spiRdy == 1)
+  if (spi_rdy == 1)
   {
-    remote_temp = spiData;
-    spiRdy = 0;
+    remote_temp = spi_data;
+    spi_rdy = 0;
     Serial.print("Temp[C]=");
     Serial.println(remote_temp, DEC);
     remote_temp_check = 1;
     use_builtin_temp = 0;
-    spiTimer = millis();
+    spi_timer = millis();
   }
 }
 
-void checkSystemOnline()
+void check_system_online()
 {
   if (digitalRead(ONLINE_PIN) == HIGH)
   {
     if (system_online == 0)
     {
       Serial.println("DEBUG: System became online");
-      sysTimer = millis();
+      sys_timer = millis();
       system_online = 1;
     }
     else
     {
       Serial.println("DEBUG: System is online");
     }
-    status_code = 2;
+    curr_status = 2;
   }
   else
   {
     if (system_online == 1)
     {
       Serial.println("DEBUG: System became offline");
-      sysTimer = millis();
+      sys_timer = millis();
       system_online = 0;
     }
     else
     {
       Serial.println("DEBUG: System is offline");
     }
-    status_code = 1;
+    curr_status = 1;
   }
 }
 
 // Needs to check all possibilities, this is a sensitive part
-void dealWithPSU()
+void deal_with_psu()
 {
+  int value = 0;
+
   if (system_online == 1)
   {
     if (psu_is_on == 0)
     {
-      status_code = 3;
+      curr_status = 3;
       Serial.println("DEBUG: System needs the PSU on");
 
-      if (digitalRead(PSU_START_PIN) > 0)
+      if ((value = digitalRead(PSU_START_PIN)) > 0)
       {
-        Serial.println("DEBUG: But seems we already tried");
+        Serial.print("DEBUG: But seems we already tried: ");
+        Serial.println(value);
 
-        if (digitalRead(PSU_OK_PIN) > 0)
+        if ((value = analogRead(PSU_OK_PIN)) > 100)
         {
-          Serial.println("DEBUG: Indeed PSU tells us it's on");
+          Serial.print("DEBUG: Indeed PSU tells us it's on: ");
+          Serial.println(value);
           psu_is_on = 1;
         }
         else
         {
-          status_code = 5;
-          Serial.println("DEBUG: But PSU is not on, let's wait a bit more");
+          curr_status = 5;
+          Serial.print("DEBUG: But PSU is not on, let's wait a bit more: ");
+          Serial.println(value);
           // panic?
         }
       }
       else
       {
-        if (digitalRead(PSU_OK_PIN) > 0)
+        if ((value = analogRead(PSU_OK_PIN)) > 100)
         {
-          status_code = 5;
-          Serial.println("DEBUG: PSU is already on, but the switch is off?");
+          curr_status = 5;
+          Serial.print("DEBUG: PSU is already on, but the switch is off? ");
+          Serial.println(value);
           // panic?
         }
 
@@ -216,9 +223,9 @@ void dealWithPSU()
   {
     if (psu_is_on == 1)
     {
-      status_code = 3;
+      curr_status = 3;
       // Wait 10 seconds before turning off the PSU. The system may be just rebooting
-      if ((sysTimer < loopTimer) && ((loopTimer - sysTimer) > 10000))
+      if ((sys_timer < loop_timer) && ((loop_timer - sys_timer) > 10000))
       {
 
         Serial.println("DEBUG: System needs the PSU off");
@@ -227,24 +234,27 @@ void dealWithPSU()
         {
           Serial.println("DEBUG: But seems we already tried to stop");
 
-          if (digitalRead(PSU_OK_PIN) == 0)
+          if ((value = analogRead(PSU_OK_PIN)) < 100)
           {
-            Serial.println("DEBUG: Indeed PSU is silent");
+            Serial.print("DEBUG: Indeed PSU is silent: ");
+            Serial.println(value);
             psu_is_on = 0;
           }
           else
           {
-            status_code = 5;
-            Serial.println("DEBUG: But PSU still on, let's wait a bit more");
+            curr_status = 5;
+            Serial.print("DEBUG: But PSU still on, let's wait a bit more: ");
+            Serial.println(value);
             // panic?
           }
         }
         else
         {
-          if (digitalRead(PSU_OK_PIN) == 0)
+          if ((value = analogRead(PSU_OK_PIN)) < 100)
           {
-            status_code = 5;
-            Serial.println("DEBUG: PSU is already off, but the switch is on?");
+            curr_status = 5;
+            Serial.print("DEBUG: PSU is already off, but the switch is on? ");
+            Serial.println(value);
             // panic?
           }
 
@@ -265,14 +275,14 @@ void dealWithPSU()
 }
 
 // Is the builtin temp sensor working?
-void checkBuiltinTemp()
+void check_builtin_temp()
 {
   if (builtin_temp_check == 0)
   {
     Serial.println("DEBUG: Checking builtin temp");
 
     // Grab a count of devices on the wire
-    uint8_t numberOfDevices = tempSensor.getDeviceCount();
+    uint8_t numberOfDevices = temp_sensor.getDeviceCount();
 
     /*
      * Constructs DallasTemperature with strong pull-up turned on. Strong pull-up is mandated in DS18B20 datasheet for parasitic
@@ -292,14 +302,14 @@ void checkBuiltinTemp()
 
       // // report parasite power requirements
       // Serial.print("DEBUG: Parasite power is: ");
-      // if (tempSensor.isParasitePowerMode())
+      // if (temp_sensor.isParasitePowerMode())
       //   Serial.println("ON");
       // else
       //   Serial.println("OFF");
     }
 
-    tempSensor.requestTemperatures(); // Send the command to get temperatures
-    float tempC = tempSensor.getTempCByIndex(0);
+    temp_sensor.requestTemperatures(); // Send the command to get temperatures
+    float tempC = temp_sensor.getTempCByIndex(0);
 
     if (tempC < 0)
     {
@@ -315,12 +325,12 @@ void checkBuiltinTemp()
   }
 }
 
-float getBuiltinTemp()
+float get_builtin_temp()
 {
   if (builtin_temp_check == 1) // && use_builtin_temp == 1)
   {
-    tempSensor.requestTemperatures(); // Send the command to get temperatures
-    float tempC = tempSensor.getTempCByIndex(0);
+    temp_sensor.requestTemperatures(); // Send the command to get temperatures
+    float tempC = temp_sensor.getTempCByIndex(0);
 
     if (tempC < 0)
     {
@@ -342,7 +352,7 @@ float getBuiltinTemp()
   }
 }
 
-float getRemoteTemp()
+float get_remote_temp()
 {
   float temp = -1.0f;
 
@@ -354,19 +364,20 @@ float getRemoteTemp()
   return temp;
 }
 
-void adjustFanSpeed()
+void adjust_fan_speed()
 {
   float temp = 0.0f;
 
   if (use_builtin_temp == 1)
   {
     Serial.println("DEBUG: Using builtin temp");
-    temp = getBuiltinTemp();
+    temp = get_builtin_temp();
   }
   else
   {
     Serial.println("DEBUG: Using remote temp");
-    temp = getRemoteTemp();
+    temp = get_remote_temp();
+    Serial.println(temp);
   }
 
   if (temp < 0.0f)
@@ -375,29 +386,34 @@ void adjustFanSpeed()
     return;
   }
 
-  if (temp < 30.0f)
+  if (temp < 35.0f)
   {
     Serial.println("DEBUG: Temp is low, let's turn off the fan");
     fan.setDutyCycle(0); // Set fan duty cycle to 0%
-  }
-  else if (temp > 40.0f)
-  {
-    Serial.println("DEBUG: Temp is getting high, let's turn on the fan");
-    fan.setDutyCycle(10); // Set fan duty cycle to 10%
-  }
-  else if (temp > 50.0f)
-  {
-    Serial.println("DEBUG: Temp is hot, let's increase the fan speed");
-    fan.setDutyCycle(30); // Set fan duty cycle to 30%
   }
   else if (temp > 60.0f)
   {
     Serial.println("DEBUG: Temp is getting crazy, let's pump it up");
     fan.setDutyCycle(60); // Set fan duty cycle to 60%
   }
+  else if (temp > 50.0f)
+  {
+    Serial.println("DEBUG: Temp is hot, let's increase the fan speed");
+    fan.setDutyCycle(30); // Set fan duty cycle to 30%
+  }
+  else if (temp > 45.0f)
+  {
+    Serial.println("DEBUG: Temp is getting high, let's turn on the fan");
+    fan.setDutyCycle(20); // Set fan duty cycle to 20%
+  }
+  else if (temp > 40.0f)
+  {
+    Serial.println("DEBUG: Temp is getting high, let's turn on the fan");
+    fan.setDutyCycle(15); // Set fan duty cycle to 15%
+  }
 }
 
-void statusCode(uint8_t code)
+void status_code(uint8_t code)
 {
 
   // total time must not exceed 2 second
@@ -425,15 +441,37 @@ void statusCode(uint8_t code)
   }
 }
 
+void buzz_it()
+{
+  tone(BUZZER, 512, 300);
+  delay(300);
+  tone(BUZZER, 1024, 500);
+}
+
+void post_beep()
+{
+  tone(BUZZER, 1024, 200);
+}
+
+void wdt_reset_fixed()
+{
+  wdt_reset(); /* Reset the watchdog */
+  // set up WDT interrupt
+  WDTCSR = (1 << WDCE) | (1 << WDE);
+  // Start watchdog timer with 4s prescaller
+  WDTCSR = (1 << WDIE) | (1 << WDE) | (1 << WDP3) | (1 << WDP0);
+}
+
 void setup()
 {
+  wdt_disable(); // Disable the watchdog to avoid infinite reset loop
   Serial.begin(9600);
   // FAN
   fan.begin();
   fan.setDutyCycle(15); // Set fan duty cycle to 10%
 
   // Start up Dallas OneWire
-  tempSensor.begin();
+  temp_sensor.begin();
 
   // SPI
   spi_slave_begin();
@@ -446,71 +484,70 @@ void setup()
   pinMode(PSU_START_PIN, OUTPUT);
   digitalWrite(PSU_START_PIN, LOW); // don't start PSU yet
 
+  pinMode(BUZZER, OUTPUT);
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
 
-  wdt_disable();       /* Disable the watchdog and wait for more than 2 seconds */
-  delay(3000);         /* Done so that the Arduino doesn't keep resetting infinitely in case of wrong configuration */
+  atimer = millis(); // starting timer
+  spi_timer = millis();
+
   wdt_enable(WDTO_4S); /* Enable the watchdog with a timeout of 4 seconds */
   // give some time to settle things
   delay(100);
-  atimer = millis(); // starting timer
-  spiTimer = millis();
+  post_beep();
 }
 
 void loop()
 {
-  loopTimer = millis();
-  if (atimer > loopTimer)
+  loop_timer = millis();
+  if (atimer > loop_timer)
   {
     // millis() overflow
-    atimer = loopTimer;
-    spiTimer = loopTimer;
+    atimer = loop_timer;
+    spi_timer = loop_timer;
   }
+
   // Task 1: Check if system is online
-  checkSystemOnline();
+  check_system_online();
 
   // Task 2: Turn on/off PSU and check the results on next iteration
-  dealWithPSU();
+  deal_with_psu();
 
   // If the system is not running, don't need to do anything else
   // Wait a bit, because the CPU may be halted and PSU is refusing to stop
   if (system_online == 1 && psu_is_on == 1)
   {
     // Task 3: Check Built-in temperature sensor
-    checkBuiltinTemp();
+    check_builtin_temp();
 
     // Task 4: Wait for SPI temperatures
-    checkRemoteTemperature();
+    check_remote_temperature();
 
     // Task 5: If SPI is silent for more than 30 seconds, use built-in temperature sensor to adjust fan speed
-    if (spiTimer < loopTimer)
+    if (spi_timer < loop_timer)
     {
-      if ((loopTimer - spiTimer) > 30000)
+      if ((loop_timer - spi_timer) > 30000)
       {
-        status_code = 4;
+        curr_status = 4;
         Serial.println("DEBUG: No remote temp for 30 sec");
         use_builtin_temp = 1;
         remote_temp_check = 0;
       }
 
       // Task 6: If SPI is silent for more than 3 minute, increase fan speed to a noisy level
-      if ((loopTimer - spiTimer) > 180000)
+      if ((loop_timer - spi_timer) > 180000)
       {
-        status_code = 6;
+        curr_status = 6;
         Serial.println("DEBUG: No remote temp for 180 sec");
-        fan.setDutyCycle(60); // Set fan duty cycle to 60%
+        buzz_it(); // fan.setDutyCycle(60); // Set fan duty cycle to 60%
       }
     }
 
-    if (status_code < 6)
-    {
-      adjustFanSpeed();
-    }
+    adjust_fan_speed();
   }
 
-  statusCode(status_code);
-  wdt_reset(); /* Reset the watchdog */
-  atimer = loopTimer;
+  status_code(curr_status);
+  atimer = loop_timer;
   Serial.println("DEBUG: End of cicle");
+  wdt_reset_fixed();
 }

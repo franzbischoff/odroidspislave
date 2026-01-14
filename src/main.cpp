@@ -367,6 +367,7 @@ float get_remote_temp()
 void adjust_fan_speed()
 {
   float temp = 0.0f;
+  byte fan_speed = 0;
 
   if (use_builtin_temp == 1)
   {
@@ -389,27 +390,13 @@ void adjust_fan_speed()
   if (temp < 35.0f)
   {
     Serial.println("DEBUG: Temp is low, let's turn off the fan");
-    fan.setDutyCycle(0); // Set fan duty cycle to 0%
+    fan.setDutyCycle(fan_speed); // Set fan duty cycle to 0%
   }
-  else if (temp > 60.0f)
-  {
-    Serial.println("DEBUG: Temp is getting crazy, let's pump it up");
-    fan.setDutyCycle(60); // Set fan duty cycle to 60%
-  }
-  else if (temp > 50.0f)
-  {
-    Serial.println("DEBUG: Temp is hot, let's increase the fan speed");
-    fan.setDutyCycle(30); // Set fan duty cycle to 30%
-  }
-  else if (temp > 45.0f)
+  else if (temp >= 40.0f)
   {
     Serial.println("DEBUG: Temp is getting high, let's turn on the fan");
-    fan.setDutyCycle(20); // Set fan duty cycle to 20%
-  }
-  else if (temp > 40.0f)
-  {
-    Serial.println("DEBUG: Temp is getting high, let's turn on the fan");
-    fan.setDutyCycle(15); // Set fan duty cycle to 15%
+    fan_speed = (byte)(2.5f * temp - 90.0f);
+    fan.setDutyCycle(fan_speed); // Set fan duty cycle to 15%
   }
 }
 

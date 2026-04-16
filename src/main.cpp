@@ -17,6 +17,7 @@
 
 #define STATUS_LED 7 // Digital pin 7
 #define BUZZER 3     // Digital pin 3 (PWM at 490hz)
+#define FAN_MAX_DUTY_CYCLE 50
 
 // Pins 10, 11, 12 and 13 are reserved for SPI.
 
@@ -24,6 +25,7 @@
 // A smaller value will give more updated results,
 // while a higher value will give more accurate and smooth readings
 #define SENSOR_THRESHOLD 1000
+#define SPI_TEMP_HEADER 0xAA
 
 /**** SPI Slave mode section */
 
@@ -31,6 +33,20 @@ typedef void (*voidFuncPtr)(void);
 static volatile voidFuncPtr intSPIFunc;
 volatile uint8_t spi_rdy;
 volatile uint8_t spi_data;
+volatile uint8_t spi_state;
+volatile uint8_t spi_temp_candidate;
+
+enum SpiFrameState : uint8_t
+{
+  SPI_WAIT_HEADER = 0,
+  SPI_WAIT_TEMP = 1,
+  SPI_WAIT_CHECKSUM = 2
+};
+
+static uint8_t make_temp_checksum(uint8_t temp)
+{
+  return (uint8_t)(SPI_TEMP_HEADER ^ temp);
+}
 
 void attachSPIInterrupt(void (*userFunc)(void))
 {
@@ -53,6 +69,8 @@ void spi_slave_begin()
 {
   spi_rdy = 0;
   spi_data = 0;
+  spi_state = SPI_WAIT_HEADER;
+  spi_temp_candidate = 0;
   pinMode(MOSI, INPUT);
   pinMode(SCK, INPUT);
   pinMode(MISO, OUTPUT);
@@ -106,8 +124,41 @@ FanController fan(FAN_TACH_PIN, SENSOR_THRESHOLD, FAN_PWM_PIN);
 
 void get_instructions()
 {
-  spi_data = spi_slave_receive();
-  spi_rdy = 1;
+  uint8_t received = spi_slave_receive();
+
+  if (spi_state == SPI_WAIT_HEADER)
+  {
+    if (received == SPI_TEMP_HEADER)
+    {
+      spi_state = SPI_WAIT_TEMP;
+    }
+    return;
+  }
+
+  if (spi_state == SPI_WAIT_TEMP)
+  {
+    spi_temp_candidate = received;
+    spi_state = SPI_WAIT_CHECKSUM;
+    return;
+  }
+
+  if (received == make_temp_checksum(spi_temp_candidate))
+  {
+    spi_data = spi_temp_candidate;
+    spi_rdy = 1;
+    spi_state = SPI_WAIT_HEADER;
+    return;
+  }
+
+  // Try to resync quickly if a new frame starts immediately after a bad checksum.
+  if (received == SPI_TEMP_HEADER)
+  {
+    spi_state = SPI_WAIT_TEMP;
+  }
+  else
+  {
+    spi_state = SPI_WAIT_HEADER;
+  }
 }
 
 uint8_t system_online = 0;
@@ -396,6 +447,10 @@ void adjust_fan_speed()
   {
     Serial.println("DEBUG: Temp is getting high, let's turn on the fan");
     fan_speed = (byte)(2.5f * temp - 90.0f);
+    if (fan_speed > FAN_MAX_DUTY_CYCLE)
+    {
+      fan_speed = FAN_MAX_DUTY_CYCLE;
+    }
     fan.setDutyCycle(fan_speed); // Set fan duty cycle to 15%
   }
 }

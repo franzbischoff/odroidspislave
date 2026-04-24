@@ -27,6 +27,16 @@
 #define SENSOR_THRESHOLD 1000
 #define SPI_TEMP_HEADER 0xAA
 
+enum SpiDebugEvent : uint8_t
+{
+  SPI_DEBUG_NONE = 0,
+  SPI_DEBUG_HEADER_OK,
+  SPI_DEBUG_FRAME_VALID,
+  SPI_DEBUG_BAD_CHECKSUM,
+  SPI_DEBUG_RESYNC_HEADER,
+  SPI_DEBUG_SS_RESYNC
+};
+
 /**** SPI Slave mode section */
 
 typedef void (*voidFuncPtr)(void);
@@ -35,6 +45,14 @@ volatile uint8_t spi_rdy;
 volatile uint8_t spi_data;
 volatile uint8_t spi_state;
 volatile uint8_t spi_temp_candidate;
+volatile uint8_t spi_frame_header;
+volatile uint8_t spi_frame_temp;
+volatile uint8_t spi_frame_checksum;
+volatile uint8_t spi_frame_expected_checksum;
+volatile uint8_t spi_debug_event;
+volatile uint8_t spi_debug_pending;
+volatile uint16_t spi_valid_frames;
+volatile uint16_t spi_invalid_frames;
 
 enum SpiFrameState : uint8_t
 {
@@ -65,12 +83,74 @@ ISR(SPI_STC_vect)
     intSPIFunc();
 }
 
+static void spi_handle_received_byte(uint8_t received)
+{
+  if (spi_state == SPI_WAIT_HEADER)
+  {
+    if (received == SPI_TEMP_HEADER)
+    {
+      spi_frame_header = received;
+      spi_debug_event = SPI_DEBUG_HEADER_OK;
+      spi_debug_pending = 1;
+      spi_state = SPI_WAIT_TEMP;
+    }
+    return;
+  }
+
+  if (spi_state == SPI_WAIT_TEMP)
+  {
+    spi_temp_candidate = received;
+    spi_frame_temp = received;
+    spi_state = SPI_WAIT_CHECKSUM;
+    return;
+  }
+
+  spi_frame_checksum = received;
+  spi_frame_expected_checksum = make_temp_checksum(spi_temp_candidate);
+
+  if (received == spi_frame_expected_checksum)
+  {
+    spi_data = spi_temp_candidate;
+    spi_rdy = 1;
+    spi_valid_frames++;
+    spi_debug_event = SPI_DEBUG_FRAME_VALID;
+    spi_debug_pending = 1;
+    spi_state = SPI_WAIT_HEADER;
+    return;
+  }
+
+  spi_invalid_frames++;
+  spi_debug_event = SPI_DEBUG_BAD_CHECKSUM;
+  spi_debug_pending = 1;
+
+  // Try to resync quickly if a new frame starts immediately after a bad checksum.
+  if (received == SPI_TEMP_HEADER)
+  {
+    spi_frame_header = received;
+    spi_debug_event = SPI_DEBUG_RESYNC_HEADER;
+    spi_debug_pending = 1;
+    spi_state = SPI_WAIT_TEMP;
+  }
+  else
+  {
+    spi_state = SPI_WAIT_HEADER;
+  }
+}
+
 void spi_slave_begin()
 {
   spi_rdy = 0;
   spi_data = 0;
   spi_state = SPI_WAIT_HEADER;
   spi_temp_candidate = 0;
+  spi_frame_header = 0;
+  spi_frame_temp = 0;
+  spi_frame_checksum = 0;
+  spi_frame_expected_checksum = 0;
+  spi_debug_event = SPI_DEBUG_NONE;
+  spi_debug_pending = 0;
+  spi_valid_frames = 0;
+  spi_invalid_frames = 0;
   pinMode(MOSI, INPUT);
   pinMode(SCK, INPUT);
   pinMode(MISO, OUTPUT);
@@ -124,41 +204,7 @@ FanController fan(FAN_TACH_PIN, SENSOR_THRESHOLD, FAN_PWM_PIN);
 
 void get_instructions()
 {
-  uint8_t received = spi_slave_receive();
-
-  if (spi_state == SPI_WAIT_HEADER)
-  {
-    if (received == SPI_TEMP_HEADER)
-    {
-      spi_state = SPI_WAIT_TEMP;
-    }
-    return;
-  }
-
-  if (spi_state == SPI_WAIT_TEMP)
-  {
-    spi_temp_candidate = received;
-    spi_state = SPI_WAIT_CHECKSUM;
-    return;
-  }
-
-  if (received == make_temp_checksum(spi_temp_candidate))
-  {
-    spi_data = spi_temp_candidate;
-    spi_rdy = 1;
-    spi_state = SPI_WAIT_HEADER;
-    return;
-  }
-
-  // Try to resync quickly if a new frame starts immediately after a bad checksum.
-  if (received == SPI_TEMP_HEADER)
-  {
-    spi_state = SPI_WAIT_TEMP;
-  }
-  else
-  {
-    spi_state = SPI_WAIT_HEADER;
-  }
+  spi_handle_received_byte(SPDR);
 }
 
 uint8_t system_online = 0;
@@ -172,9 +218,151 @@ unsigned long atimer = 0;
 unsigned long spi_timer = 0;
 unsigned long sys_timer = 0;
 unsigned long loop_timer = 0;
+uint8_t last_ss_state = HIGH;
+uint8_t fan_boot_test_done = 0;
+
+void debug_dump_spi_packet()
+{
+  uint8_t frame_header = 0;
+  uint8_t frame_temp = 0;
+  uint8_t frame_checksum = 0;
+  uint8_t frame_expected_checksum = 0;
+  uint8_t debug_event = SPI_DEBUG_NONE;
+  uint8_t have_debug = 0;
+  uint16_t valid_frames = 0;
+  uint16_t invalid_frames = 0;
+
+  noInterrupts();
+  if (spi_debug_pending == 1)
+  {
+    frame_header = spi_frame_header;
+    frame_temp = spi_frame_temp;
+    frame_checksum = spi_frame_checksum;
+    frame_expected_checksum = spi_frame_expected_checksum;
+    debug_event = spi_debug_event;
+    valid_frames = spi_valid_frames;
+    invalid_frames = spi_invalid_frames;
+    spi_debug_pending = 0;
+    have_debug = 1;
+  }
+  interrupts();
+
+  if (have_debug == 0)
+  {
+    return;
+  }
+
+  if (debug_event == SPI_DEBUG_HEADER_OK)
+  {
+    Serial.print("DEBUG: SPI sync header detected: 0x");
+    Serial.println(frame_header, HEX);
+    return;
+  }
+
+  if (debug_event == SPI_DEBUG_FRAME_VALID)
+  {
+    Serial.print("DEBUG: SPI packet raw header=0x");
+    Serial.print(frame_header, HEX);
+    Serial.print(" temp=0x");
+    Serial.print(frame_temp, HEX);
+    Serial.print(" checksum=0x");
+    Serial.print(frame_checksum, HEX);
+    Serial.print(" valid_frames=");
+    Serial.print(valid_frames);
+    Serial.print(" invalid_frames=");
+    Serial.println(invalid_frames);
+    Serial.print("DEBUG: SPI packet temperature[C]=");
+    Serial.println(frame_temp, DEC);
+    return;
+  }
+
+  if (debug_event == SPI_DEBUG_BAD_CHECKSUM)
+  {
+    Serial.print("DEBUG: SPI packet invalid header=0x");
+    Serial.print(frame_header, HEX);
+    Serial.print(" temp=0x");
+    Serial.print(frame_temp, HEX);
+    Serial.print(" checksum=0x");
+    Serial.print(frame_checksum, HEX);
+    Serial.print(" expected=0x");
+    Serial.print(frame_expected_checksum, HEX);
+    Serial.print(" valid_frames=");
+    Serial.print(valid_frames);
+    Serial.print(" invalid_frames=");
+    Serial.println(invalid_frames);
+    return;
+  }
+
+  if (debug_event == SPI_DEBUG_RESYNC_HEADER)
+  {
+    Serial.println("DEBUG: SPI checksum failed but next byte looks like a new header, re-syncing");
+    return;
+  }
+
+  if (debug_event == SPI_DEBUG_SS_RESYNC)
+  {
+    Serial.println("DEBUG: SPI CS released mid-frame, resetting parser to wait for next header");
+  }
+}
+
+void check_spi_sync()
+{
+  uint8_t ss_state = digitalRead(SS);
+
+  if (last_ss_state == LOW && ss_state == HIGH && spi_state != SPI_WAIT_HEADER)
+  {
+    noInterrupts();
+    spi_state = SPI_WAIT_HEADER;
+    spi_temp_candidate = 0;
+    spi_debug_event = SPI_DEBUG_SS_RESYNC;
+    spi_debug_pending = 1;
+    interrupts();
+  }
+
+  last_ss_state = ss_state;
+}
+
+void run_fan_boot_test()
+{
+  fan.setDutyCycle(15);
+  delay(1000);
+
+  fan.setDutyCycle(50);
+  delay(1000);
+
+  fan.setDutyCycle(30);
+  delay(1000);
+
+  fan.setDutyCycle(15);
+}
+
+uint8_t get_builtin_sensor_count()
+{
+  uint8_t numberOfDevices = 0;
+
+  detachSPIInterrupt();
+  numberOfDevices = temp_sensor.getDeviceCount();
+  attachSPIInterrupt(get_instructions);
+
+  return numberOfDevices;
+}
+
+float read_builtin_temperature()
+{
+  float tempC = DEVICE_DISCONNECTED_C;
+
+  detachSPIInterrupt();
+  temp_sensor.requestTemperatures();
+  tempC = temp_sensor.getTempCByIndex(0);
+  attachSPIInterrupt(get_instructions);
+
+  return tempC;
+}
 
 void check_remote_temperature()
 {
+  check_spi_sync();
+  debug_dump_spi_packet();
   Serial.println("DEBUG: Checking remote temperature");
   if (spi_rdy == 1)
   {
@@ -185,6 +373,20 @@ void check_remote_temperature()
     remote_temp_check = 1;
     use_builtin_temp = 0;
     spi_timer = millis();
+  }
+}
+
+void update_temperature_source()
+{
+  if (spi_timer < loop_timer && (loop_timer - spi_timer) > 30000)
+  {
+    if (use_builtin_temp == 0 || remote_temp_check == 1)
+    {
+      curr_status = 4;
+      Serial.println("DEBUG: No remote temp for 30 sec");
+    }
+    use_builtin_temp = 1;
+    remote_temp_check = 0;
   }
 }
 
@@ -211,6 +413,7 @@ void check_system_online()
       Serial.println("DEBUG: System became offline");
       sys_timer = millis();
       system_online = 0;
+      fan_boot_test_done = 0;
     }
     else
     {
@@ -290,6 +493,7 @@ void deal_with_psu()
             Serial.print("DEBUG: Indeed PSU is silent: ");
             Serial.println(value);
             psu_is_on = 0;
+            fan_boot_test_done = 0;
           }
           else
           {
@@ -333,7 +537,8 @@ void check_builtin_temp()
     Serial.println("DEBUG: Checking builtin temp");
 
     // Grab a count of devices on the wire
-    uint8_t numberOfDevices = temp_sensor.getDeviceCount();
+    Serial.println("DEBUG: Pausing SPI IRQ while probing builtin temp sensor");
+    uint8_t numberOfDevices = get_builtin_sensor_count();
 
     /*
      * Constructs DallasTemperature with strong pull-up turned on. Strong pull-up is mandated in DS18B20 datasheet for parasitic
@@ -359,10 +564,9 @@ void check_builtin_temp()
       //   Serial.println("OFF");
     }
 
-    temp_sensor.requestTemperatures(); // Send the command to get temperatures
-    float tempC = temp_sensor.getTempCByIndex(0);
+    float tempC = read_builtin_temperature();
 
-    if (tempC < 0)
+    if (tempC == DEVICE_DISCONNECTED_C)
     {
       Serial.println("DEBUG: reading error, check wiring");
       return;
@@ -380,10 +584,9 @@ float get_builtin_temp()
 {
   if (builtin_temp_check == 1) // && use_builtin_temp == 1)
   {
-    temp_sensor.requestTemperatures(); // Send the command to get temperatures
-    float tempC = temp_sensor.getTempCByIndex(0);
+    float tempC = read_builtin_temperature();
 
-    if (tempC < 0)
+    if (tempC == DEVICE_DISCONNECTED_C)
     {
       Serial.println("DEBUG: reading error, check wiring");
       builtin_temp_check = 0;
@@ -510,7 +713,7 @@ void setup()
   Serial.begin(9600);
   // FAN
   fan.begin();
-  fan.setDutyCycle(15); // Set fan duty cycle to 10%
+  fan.setDutyCycle(15);
 
   // Start up Dallas OneWire
   temp_sensor.begin();
@@ -529,6 +732,7 @@ void setup()
   pinMode(BUZZER, OUTPUT);
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
+  last_ss_state = digitalRead(SS);
 
   atimer = millis(); // starting timer
   spi_timer = millis();
@@ -555,27 +759,26 @@ void loop()
   // Task 2: Turn on/off PSU and check the results on next iteration
   deal_with_psu();
 
-  // If the system is not running, don't need to do anything else
-  // Wait a bit, because the CPU may be halted and PSU is refusing to stop
+  // Always process SPI frames so remote temperature reception is visible
+  // even when the system state machine is not yet fully online.
+  check_remote_temperature();
+  update_temperature_source();
+
+  // Probe the builtin sensor so it is available as a fallback source.
+  check_builtin_temp();
+
+  // The boot test is only relevant while the system is online and the PSU is on.
   if (system_online == 1 && psu_is_on == 1)
   {
-    // Task 3: Check Built-in temperature sensor
-    check_builtin_temp();
-
-    // Task 4: Wait for SPI temperatures
-    check_remote_temperature();
+    if (fan_boot_test_done == 0)
+    {
+      run_fan_boot_test();
+      fan_boot_test_done = 1;
+    }
 
     // Task 5: If SPI is silent for more than 30 seconds, use built-in temperature sensor to adjust fan speed
     if (spi_timer < loop_timer)
     {
-      if ((loop_timer - spi_timer) > 30000)
-      {
-        curr_status = 4;
-        Serial.println("DEBUG: No remote temp for 30 sec");
-        use_builtin_temp = 1;
-        remote_temp_check = 0;
-      }
-
       // Task 6: If SPI is silent for more than 3 minute, increase fan speed to a noisy level
       if ((loop_timer - spi_timer) > 180000)
       {
@@ -584,12 +787,13 @@ void loop()
         buzz_it(); // fan.setDutyCycle(60); // Set fan duty cycle to 60%
       }
     }
-
-    adjust_fan_speed();
   }
+
+  // Keep the fan under temperature control even while the PSU state machine
+  // is waiting to turn off or already considers the system offline.
+  adjust_fan_speed();
 
   status_code(curr_status);
   atimer = loop_timer;
-  Serial.println("DEBUG: End of cicle");
   wdt_reset_fixed();
 }
